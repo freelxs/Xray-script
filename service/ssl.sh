@@ -2,7 +2,7 @@
 # =============================================================================
 # 注释: 通过 Qwen3-Coder 生成。
 # 脚本名称: ssl.sh
-# 脚本仓库: https://github.com/zxcvos/Xray-script
+# 脚本仓库: https://github.com/freelxs/Xray-script
 # 功能描述: 使用 acme.sh 管理 SSL 证书的脚本。
 #           支持安装/更新/卸载 acme.sh，签发/续期/停止续期证书，
 #           检查证书状态和信息，以及管理 Nginx 配置。
@@ -40,6 +40,12 @@ readonly NC='\033[0m'      # 无颜色（重置）
 readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)" # 当前脚本所在目录
 readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"         # 当前脚本文件名 (不含扩展名)
 readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
+# shellcheck source=../core/secure_fetch.sh
+source "${PROJECT_ROOT}/core/secure_fetch.sh"
+
+# acme.sh 3.1.6 源码包。覆盖版本时必须同时设置 ACME_SHA256。
+readonly PIN_ACME_VERSION="3.1.6"
+readonly PIN_ACME_SHA256="0d3f9000ac44a6331314742a88c475f79134e24fc991997883652adc59efc486"
 
 # 定义项目中各个重要目录与配置文件的路径
 readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"              # 主配置文件目录
@@ -198,6 +204,34 @@ function set_default_ca() {
 # 参数: 无 (使用全局变量 ACCOUNT_EMAIL)
 # 返回值: 无 (安装成功或失败后退出)
 # =============================================================================
+function install_pinned_acme() {
+    local version sha url work archive src
+
+    version="${ACME_VERSION:-${PIN_ACME_VERSION}}"
+    sha="${ACME_SHA256:-${PIN_ACME_SHA256}}"
+    if [[ -n "${ACME_VERSION:-}" && -z "${ACME_SHA256:-}" ]]; then
+        print_error "ACME_VERSION requires ACME_SHA256"
+    fi
+    [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || print_error "invalid acme.sh version"
+    url="https://github.com/acmesh-official/acme.sh/archive/refs/tags/${version}.tar.gz"
+
+    work="$(mktemp -d)"
+    archive="${work}/acme.sh.tar.gz"
+    fetch_verified "${url}" "${archive}" "${sha}" || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.install.fail_download")"
+    tar -xzf "${archive}" -C "${work}" || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.install.fail_download")"
+    src="$(find "${work}" -mindepth 1 -maxdepth 1 -type d -name 'acme.sh-*' | head -n 1)"
+    [[ -n "${src}" && -f "${src}/acme.sh" ]] || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.install.fail_download")"
+    chmod +x "${src}/acme.sh"
+    if [[ -n "${ACCOUNT_EMAIL}" ]]; then
+        "${src}/acme.sh" --install --home "${HOME}/.acme.sh" -m "${ACCOUNT_EMAIL}" || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.install.fail_download")"
+    else
+        "${src}/acme.sh" --install --home "${HOME}/.acme.sh" || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.install.fail_download")"
+    fi
+    # 关闭上游自动升级，避免之后再拉取未钉扎的脚本。
+    "${HOME}/.acme.sh/acme.sh" --upgrade --auto-upgrade 0 || print_warn "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.purge.fail_disable_autoupgrade")"
+    rm -rf "${work}"
+}
+
 function install_acme_sh() {
     # 检查 acme.sh 是否已经安装
     if [[ -e "${HOME}/.acme.sh/acme.sh" ]]; then
@@ -208,12 +242,7 @@ function install_acme_sh() {
     # 打印安装信息
     print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.install.start")"
     resolve_ca_server
-
-    # 使用 curl 下载并运行 acme.sh 安装脚本，设置账户邮箱
-    curl https://get.acme.sh | sh -s email="${ACCOUNT_EMAIL}" || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.install.fail_download")"
-
-    # 启用 acme.sh 的自动升级功能
-    "${HOME}/.acme.sh/acme.sh" --upgrade --auto-upgrade || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.install.fail_autoupgrade")"
+    install_pinned_acme
 
     "${HOME}/.acme.sh/acme.sh" --set-default-ca --server "${CA_SERVER}" || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.install.fail_set_ca")"
 }
@@ -225,11 +254,9 @@ function install_acme_sh() {
 # 返回值: 无 (更新成功或失败后退出)
 # =============================================================================
 function update_acme_sh() {
-    # 打印更新信息
+    # 重新安装钉扎版本，而不是让 acme.sh 自行拉取最新脚本。
     print_info "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.update.start")"
-
-    # 执行 acme.sh 的升级命令
-    "${HOME}/.acme.sh/acme.sh" --upgrade || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.update.fail")"
+    install_pinned_acme || print_error "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.update.fail")"
 }
 
 # =============================================================================

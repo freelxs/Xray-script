@@ -46,7 +46,7 @@
 
 ## 问题
 
-1. 如果安装成功，但无法使用，请检查服务器是否开启对应端口，可通过 `https://tcp.ping.pe/ip:port` 验证服务器端口是否开放。
+1. 如果安装成功，但无法使用，请在服务器上检查端口是否在监听、防火墙是否放行（例如 `ss -lnt`、`ufw status`）。不要把服务器 IP 或端口提交到第三方探测网站。
 2. 使用 SNI 配置前，请确保 VPS 的 HTTP(80) 与 HTTPS(443) 端口开放。
 3. 使用 SNI 配置前，请不要开启 CDN 保护，不然无法正常申请 SSL 证书。
 4. 上下行分离详情请看 [XHTTP: Beyond REALITY][XHTTP] 与 [xhttp 五合一配置][xhttp 五合一配置] 了解。
@@ -77,10 +77,10 @@ SNI 配置中，CDN 的分享链接 Alpn 默认为 H2，如有 H3 需求，请�
 
 ## 如何使用
 
-* 获取
+* 获取（本 fork，校验证书，不关闭 TLS 校验）
 
   ```sh
-  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/zxcvos/Xray-script/main/install.sh
+  curl -fsSL --proto '=https' --tlsv1.2 -o "${HOME}/Xray-script.sh" https://raw.githubusercontent.com/freelxs/Xray-script/main/install.sh
   ```
 
 * 使用
@@ -111,8 +111,34 @@ SNI 配置中，CDN 的分享链接 Alpn 默认为 H2，如有 H3 需求，请�
 * 快速启动(界面)
 
   ```sh
-  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/zxcvos/Xray-script/main/install.sh && bash ${HOME}/Xray-script.sh
+  curl -fsSL --proto '=https' --tlsv1.2 -o "${HOME}/Xray-script.sh" https://raw.githubusercontent.com/freelxs/Xray-script/main/install.sh && bash "${HOME}/Xray-script.sh"
   ```
+
+已经克隆本仓库时，直接运行仓库里的 `bash install.sh`。完整本地目录会被安装到目标路径，运行时不会再从网络拉一份覆盖它。
+
+自更新默认关闭。需要从本 fork 更新已安装副本时：
+
+```sh
+bash "${HOME}/Xray-script.sh" --update
+```
+
+可选 `XRAY_SCRIPT_REF`（分支、标签或 40 位提交）和 `XRAY_SCRIPT_SHA256`（压缩包校验和）。脚本拒绝访问 `zxcvos/Xray-script`。
+
+公网地址默认只来自本机网卡，或来自 `~/.xray-script/config.json` 的 `network.public_ip` / `network.public_ipv6`，也可以用环境变量 `XRAY_SCRIPT_PUBLIC_IP` / `XRAY_SCRIPT_PUBLIC_IPV6`。只有 `XRAY_SCRIPT_IP_LOOKUP=1` 时才会请求 `https://ipv4.icanhazip.com` 和 `https://ipv6.icanhazip.com`。
+
+## 供应链钉扎
+
+| 组件 | 钉扎 |
+| --- | --- |
+| acme.sh | 3.1.6，校验 SHA-256，并关闭自动升级 |
+| Docker 安装脚本 | `docker/docker-install` `ada7a567e59b3935bd601bb21e422da50e80e376`，校验 SHA-256。引擎软件包仍来自 Docker 签名仓库的 stable 通道 |
+| Xray 安装脚本 | `XTLS/Xray-install` `e741a4f56d368afbb9e5be3361b40c4552d3710d`，校验 SHA-256。Xray 发行包由该脚本按其附带的 SHA-256 校验 |
+| Nginx | 1.30.6，校验 SHA-256，并用仓库内的 nginx.org 开发者公钥验 GPG 签名 |
+| OpenSSL | 3.5.9 LTS，校验 SHA-256，并用仓库内的 OpenSSL 发布公钥验 GPG 签名（指纹 `B146647E45A7B33947AB226B2A2C87D161692D40`，与 openssl.org 公布的一致） |
+| ngx_brotli | `a71f9312c2deb28875acc7bacfdd5695a111aa53` |
+| geodata | 校验 Loyalsoldier 发布的 SHA-256。默认跟踪 `latest`，设置 `GEODATA_TAG` 可固定某一次发布 |
+
+Nginx worker 使用系统用户 `nginx`。主进程仍以 root 启动，以便绑定 80/443。
 
 ## 脚本界面
 
@@ -124,7 +150,7 @@ SNI 配置中，CDN 的分享链接 Alpn 默认为 H2，如有 H3 需求，请�
   / . \  | |  | |    | |       | |    | |     
  /_/ \_\ |_|  |_|    |_|       |_|    |_|     
 
-Copyright (C) zxcvos | https://github.com/zxcvos/Xray-script
+Copyright (C) zxcvos | https://github.com/freelxs/Xray-script
 
 -------------------------------------------
 Xray       : v25.7.26

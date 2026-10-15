@@ -3,7 +3,7 @@
 # Copyright (C) 2025 zxcvos
 #
 # Xray-script:
-#   https://github.com/zxcvos/Xray-script
+#   https://github.com/freelxs/Xray-script
 #
 # docker-install:
 #   https://github.com/docker/docker-install
@@ -48,6 +48,12 @@ readonly NC='\033[0m'      # 无颜色（重置）
 readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)" # 当前脚本所在目录
 readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"         # 当前脚本文件名 (不含扩展名)
 readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
+# shellcheck source=../core/secure_fetch.sh
+source "${PROJECT_ROOT}/core/secure_fetch.sh"
+
+# docker/docker-install install.sh at ada7a567e59b3935bd601bb21e422da50e80e376
+readonly DOCKER_INSTALL_COMMIT="ada7a567e59b3935bd601bb21e422da50e80e376"
+readonly DOCKER_INSTALL_SHA256="2b102d809152ea157a59f171319f489d971273b2d26dd7e9a6d1d737ce89289d"
 
 # 定义项目中各个重要目录与配置文件的路径
 readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"              # 主配置文件目录
@@ -218,8 +224,13 @@ function install_docker() {
     # 打印开始安装的信息
     print_info "$(echo "$I18N_DATA" | jq -r '.docker.install.start')"
 
-    # 下载 Docker 官方安装脚本到工具目录
-    wget -O "${TOOL_DIR}/install-docker.sh" https://get.docker.com
+    # 下载钉扎的 Docker 官方安装脚本，并校验 SHA-256。软件包仍来自 Docker 签名仓库。
+    mkdir -p "${TOOL_DIR}"
+    fetch_verified \
+        "https://raw.githubusercontent.com/docker/docker-install/${DOCKER_INSTALL_COMMIT}/install.sh" \
+        "${TOOL_DIR}/install-docker.sh" \
+        "${DOCKER_INSTALL_SHA256}" || print_error "Docker installer download or checksum failed"
+    chmod 0700 "${TOOL_DIR}/install-docker.sh"
 
     # 检查是否为 CentOS 8 系统
     if [[ "$(_os)" == "centos" && "$(_os_ver)" -eq 8 ]]; then
