@@ -47,7 +47,7 @@
 
 ## FAQ
 
-1. If installation succeeds but service is unusable, check whether the server ports are open. You can verify using `https://tcp.ping.pe/ip:port`.
+1. If installation succeeds but the service is unusable, check on the server whether the port is listening and allowed by the firewall (`ss -lnt`, `ufw status`). Do not submit the server IP or port to a third-party probe site.
 2. Before using SNI configuration, ensure VPS HTTP (80) and HTTPS (443) ports are open.
 3. Before using SNI configuration, do not enable CDN protection, otherwise SSL issuance may fail.
 4. For upstream/downstream separation details, see [XHTTP: Beyond REALITY][XHTTP] and [xhttp 五合一配置][xhttp 五合一配置].
@@ -81,7 +81,7 @@ In SNI configuration, CDN share links use H2 as default ALPN. If you need H3, mo
 * Download
 
   ```sh
-  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/zxcvos/Xray-script/main/install.sh
+  curl -fsSL --proto '=https' --tlsv1.2 -o "${HOME}/Xray-script.sh" https://raw.githubusercontent.com/freelxs/Xray-script/main/install.sh
   ```
 
 * Usage
@@ -112,8 +112,34 @@ In SNI configuration, CDN share links use H2 as default ALPN. If you need H3, mo
 * Quick start (UI)
 
   ```sh
-  wget --no-check-certificate -O ${HOME}/Xray-script.sh https://raw.githubusercontent.com/zxcvos/Xray-script/main/install.sh && bash ${HOME}/Xray-script.sh
+  curl -fsSL --proto '=https' --tlsv1.2 -o "${HOME}/Xray-script.sh" https://raw.githubusercontent.com/freelxs/Xray-script/main/install.sh && bash "${HOME}/Xray-script.sh"
   ```
+
+When this repository is already cloned, run `bash install.sh` from it. A complete local tree is installed as-is and is not replaced by a network download.
+
+Self-update is off by default. To replace the installed copy from this fork:
+
+```sh
+bash "${HOME}/Xray-script.sh" --update
+```
+
+Optional: `XRAY_SCRIPT_REF` (branch, tag, or 40-character commit) and `XRAY_SCRIPT_SHA256` (tarball digest). The script refuses `zxcvos/Xray-script`.
+
+The public address comes from a local interface, from `network.public_ip` / `network.public_ipv6` in `~/.xray-script/config.json`, or from `XRAY_SCRIPT_PUBLIC_IP` / `XRAY_SCRIPT_PUBLIC_IPV6`. `https://ipv4.icanhazip.com` and `https://ipv6.icanhazip.com` are contacted only when `XRAY_SCRIPT_IP_LOOKUP=1`.
+
+## Supply-chain pins
+
+| Component | Pin |
+| --- | --- |
+| acme.sh | 3.1.6, SHA-256 checked, auto-upgrade disabled |
+| Docker install script | `docker/docker-install` `ada7a567e59b3935bd601bb21e422da50e80e376`, SHA-256 checked. Engine packages still come from Docker's signed stable channel |
+| Xray install script | `XTLS/Xray-install` `e741a4f56d368afbb9e5be3361b40c4552d3710d`, SHA-256 checked. The Xray release archive is checked with the SHA-256 published beside it |
+| Nginx | 1.30.6, SHA-256 plus GPG using the nginx.org developer keys stored in this repo |
+| OpenSSL | 3.5.9 LTS, SHA-256 plus GPG using the OpenSSL release key stored in this repo (fingerprint `B146647E45A7B33947AB226B2A2C87D161692D40`, the fingerprint published by openssl.org) |
+| ngx_brotli | `a71f9312c2deb28875acc7bacfdd5695a111aa53` |
+| geodata | SHA-256 published by Loyalsoldier. Tracks `latest` unless `GEODATA_TAG` is set |
+
+Nginx workers run as the `nginx` system user. The master process still starts as root so it can bind ports 80 and 443.
 
 ## Script UI
 
@@ -125,7 +151,7 @@ In SNI configuration, CDN share links use H2 as default ALPN. If you need H3, mo
   / . \  | |  | |    | |       | |    | |     
  /_/ \_\ |_|  |_|    |_|       |_|    |_|     
 
-Copyright (C) zxcvos | https://github.com/zxcvos/Xray-script
+Copyright (C) zxcvos | https://github.com/freelxs/Xray-script
 
 -------------------------------------------
 Xray       : v25.7.26

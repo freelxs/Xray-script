@@ -3,7 +3,7 @@
 # Copyright (C) 2025 zxcvos
 #
 # Xray-script:
-#   https://github.com/zxcvos/Xray-script
+#   https://github.com/freelxs/Xray-script
 # =============================================================================
 # 注释: 通过 Qwen3-Coder 生成。
 # 脚本名称: share.sh
@@ -38,6 +38,8 @@ readonly NC='\033[0m'      # 无颜色（重置）
 readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)" # 当前脚本所在目录
 readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"         # 当前脚本文件名 (不含扩展名)
 readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
+# shellcheck source=net.sh
+source "${CUR_DIR}/net.sh"
 
 # 定义配置文件和相关目录的路径
 readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"              # 主配置文件目录
@@ -176,8 +178,13 @@ function cache_json_data() {
 function get_common_config() {
     local inbound_index=$1 # 获取 inbound 索引参数
 
-    # 获取服务器的公网 IPv4 地址作为远程主机地址
-    CLIENT_CONFIG[remote_host]="$(curl -fsSL ipv4.icanhazip.com)"
+    # 分享链接地址来自用户配置或本机网卡。默认不查询第三方。
+    CLIENT_CONFIG[remote_host]="$(resolve_share_address || true)"
+    if [[ -z "${CLIENT_CONFIG[remote_host]}" ]]; then
+        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.address_missing")" >&2
+    elif ! share_address_is_public "${CLIENT_CONFIG[remote_host]}"; then
+        echo -e "${YELLOW}[$(echo "$I18N_DATA" | jq -r '.title.warn')]${NC} $(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.address_private")" >&2
+    fi
     # 从脚本配置中获取端口号
     CLIENT_CONFIG[port]="$(echo "${SCRIPT_CONFIG}" | jq -r ".xray.port")"
     # 从脚本配置中获取 Reality 公钥

@@ -2,7 +2,7 @@
 # =============================================================================
 # 注释: 通过 Qwen3-Coder 生成。
 # 脚本名称: nginx.sh
-# 脚本仓库: https://github.com/zxcvos/Xray-script
+# 脚本仓库: https://github.com/freelxs/Xray-script
 # 功能描述: 用于从源代码编译、安装、更新和卸载 Nginx 的脚本。
 #           支持集成最新版 OpenSSL 和可选的 Brotli 压缩模块。
 #           负责管理 Nginx 的 systemd 服务配置。
@@ -47,6 +47,18 @@ readonly NC='\033[0m'      # 无颜色（重置）
 readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)" # 当前脚本所在目录
 readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"         # 当前脚本文件名 (不含扩展名)
 readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
+# shellcheck source=../core/secure_fetch.sh
+source "${PROJECT_ROOT}/core/secure_fetch.sh"
+
+# 钉扎的构建输入。覆盖版本时必须同时给出 SHA-256。
+readonly PIN_NGINX_VERSION="1.30.6"
+readonly PIN_NGINX_SHA256="3cf46f5ed7504d460125866b7bea99fb357f31d887e2e63b35503310e9b8b6c8"
+readonly PIN_OPENSSL_VERSION="3.5.9"
+readonly PIN_OPENSSL_SHA256="603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a"
+readonly PIN_NGX_BROTLI_COMMIT="a71f9312c2deb28875acc7bacfdd5695a111aa53"
+readonly OPENSSL_SIGNING_FINGERPRINT="B146647E45A7B33947AB226B2A2C87D161692D40"
+readonly NGINX_RUN_USER="nginx"
+readonly NGINX_RUN_GROUP="nginx"
 
 # 定义项目中各个重要目录与配置文件的路径
 readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"              # 主配置文件目录
@@ -158,6 +170,121 @@ function print_error() {
     printf "${RED}[$(echo "$I18N_DATA" | jq -r '.title.error')] ${NC}%s\n" "$*" >&2
     # 打印错误信息后退出脚本，错误码为 1
     exit 1
+}
+
+# 解析本次编译使用的 Nginx / OpenSSL 版本。环境变量覆盖必须自带校验和。
+function resolve_build_versions() {
+    NGINX_BUILD_VERSION="${NGINX_VERSION:-${PIN_NGINX_VERSION}}"
+    NGINX_BUILD_SHA256="${NGINX_SHA256:-${PIN_NGINX_SHA256}}"
+    OPENSSL_BUILD_VERSION="${OPENSSL_VERSION:-${PIN_OPENSSL_VERSION}}"
+    OPENSSL_BUILD_SHA256="${OPENSSL_SHA256:-${PIN_OPENSSL_SHA256}}"
+
+    if [[ -n "${NGINX_VERSION:-}" && -z "${NGINX_SHA256:-}" ]]; then
+        print_error "NGINX_VERSION requires NGINX_SHA256"
+    fi
+    if [[ -n "${OPENSSL_VERSION:-}" && -z "${OPENSSL_SHA256:-}" ]]; then
+        print_error "OPENSSL_VERSION requires OPENSSL_SHA256"
+    fi
+    [[ "${NGINX_BUILD_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || print_error "invalid nginx version"
+    [[ "${OPENSSL_BUILD_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || print_error "invalid openssl version"
+    [[ "${NGINX_BUILD_SHA256}" =~ ^[0-9a-fA-F]{64}$ ]] || print_error "invalid nginx checksum"
+    [[ "${OPENSSL_BUILD_SHA256}" =~ ^[0-9a-fA-F]{64}$ ]] || print_error "invalid openssl checksum"
+}
+
+# 用仓库内钉扎的开发者公钥校验 nginx.org 源码包签名。
+function verify_nginx_signature() {
+    local tarball="$1"
+    local signature="$2"
+    local gnupg_home key fpr
+    local -a keys=(
+        "${PROJECT_ROOT}/config/keys/nginx-pluknet.key"
+        "${PROJECT_ROOT}/config/keys/nginx-arut.key"
+        "${PROJECT_ROOT}/config/keys/nginx-thresh.key"
+    )
+    local -a allowed_fprs=(
+        D6786CE303D9A9022998DC6CC8464D549AF75C0A
+        43387825DDB1BB97EC36BA5D007C8D7C15D87369
+        13C82A63B603576156E30A4EA0EA981B66B0D967
+    )
+
+    gnupg_home="$(mktemp -d)"
+    chmod 700 "${gnupg_home}"
+    for key in "${keys[@]}"; do
+        [[ -f "${key}" ]] || print_error "missing nginx signing key: ${key}"
+        gpg --batch --homedir "${gnupg_home}" --import "${key}" >/dev/null 2>&1 || print_error "failed to import ${key}"
+        fpr="$(gpg --batch --homedir "${gnupg_home}" --show-keys --with-colons "${key}" | awk -F: '/^fpr:/ {print $10; exit}')"
+        local allowed=0
+        local item
+        for item in "${allowed_fprs[@]}"; do
+            [[ "${fpr}" == "${item}" ]] && allowed=1
+        done
+        [[ "${allowed}" -eq 1 ]] || print_error "unexpected nginx signing key fingerprint: ${fpr}"
+    done
+    gpg --batch --homedir "${gnupg_home}" --trust-model always --verify "${signature}" "${tarball}" >/dev/null 2>&1 || {
+        rm -rf "${gnupg_home}"
+        print_error "nginx signature verification failed"
+    }
+    rm -rf "${gnupg_home}"
+}
+
+# 用单一已钉扎公钥校验分离签名。
+function verify_detached_signature() {
+    local tarball="$1"
+    local signature="$2"
+    local key="$3"
+    local expected_fpr="$4"
+    local gnupg_home fpr
+
+    [[ -f "${key}" ]] || print_error "missing signing key: ${key}"
+    gnupg_home="$(mktemp -d)"
+    chmod 700 "${gnupg_home}"
+    gpg --batch --homedir "${gnupg_home}" --import "${key}" >/dev/null 2>&1 || print_error "failed to import ${key}"
+    fpr="$(gpg --batch --homedir "${gnupg_home}" --show-keys --with-colons "${key}" | awk -F: '/^fpr:/ {print $10; exit}')"
+    [[ "${fpr}" == "${expected_fpr}" ]] || print_error "unexpected signing key fingerprint: ${fpr}"
+    gpg --batch --homedir "${gnupg_home}" --trust-model always --verify "${signature}" "${tarball}" >/dev/null 2>&1 || {
+        rm -rf "${gnupg_home}"
+        print_error "signature verification failed for ${tarball}"
+    }
+    rm -rf "${gnupg_home}"
+}
+
+# 创建非特权的 worker 用户。主进程仍由 root 启动，以便绑定 80/443。
+function ensure_nginx_user() {
+    if ! getent group "${NGINX_RUN_GROUP}" >/dev/null 2>&1; then
+        groupadd --system "${NGINX_RUN_GROUP}"
+    fi
+    if ! getent passwd "${NGINX_RUN_USER}" >/dev/null 2>&1; then
+        useradd --system --gid "${NGINX_RUN_GROUP}" --no-create-home --shell /usr/sbin/nologin "${NGINX_RUN_USER}"
+    fi
+}
+
+# 准备 worker 可写目录，并把已安装配置里的 user root 改成 nginx。
+function ensure_nginx_runtime() {
+    local conf="/usr/local/nginx/conf/nginx.conf"
+
+    ensure_nginx_user
+    mkdir -p /var/log/nginx
+    chown "${NGINX_RUN_USER}:${NGINX_RUN_GROUP}" /var/log/nginx
+    chmod 750 /var/log/nginx
+    if [[ -f "${conf}" ]] && grep -qE '^[[:space:]]*user[[:space:]]+root[[:space:]]*;' "${conf}"; then
+        sed -i -E 's/^([[:space:]]*)user[[:space:]]+root[[:space:]]*;/\1user nginx;/' "${conf}"
+    fi
+}
+
+# 按固定提交获取 ngx_brotli，并用 git 对象 ID 确认内容。
+function fetch_ngx_brotli() {
+    local dest="$1"
+    local head
+
+    rm -rf "${dest}"
+    mkdir -p "${dest}"
+    git -C "${dest}" init -q
+    git -C "${dest}" remote add origin https://github.com/google/ngx_brotli.git
+    GIT_TERMINAL_PROMPT=0 git -C "${dest}" fetch --depth 1 origin "${PIN_NGX_BROTLI_COMMIT}"
+    git -C "${dest}" checkout --detach FETCH_HEAD
+    head="$(git -C "${dest}" rev-parse HEAD)"
+    [[ "${head}" == "${PIN_NGX_BROTLI_COMMIT}" ]] || print_error "ngx_brotli commit mismatch: ${head}"
+    git -C "${dest}" submodule update --init --recursive --depth 1
 }
 
 # =============================================================================
@@ -275,6 +402,12 @@ function _error_detect() {
 function _version_ge() {
     # 使用 sort -rV (版本号逆序排序) 来比较版本
     test "$(echo "$@" | tr " " "\n" | sort -rV | head -n 1)" == "$1"
+}
+
+# 第一个版本号严格大于第二个时返回 0。
+function _version_gt() {
+    [[ -n "$1" && -n "$2" ]] || return 0
+    _version_ge "$1" "$2" && [[ "$1" != "$2" ]]
 }
 
 # =============================================================================
@@ -436,7 +569,7 @@ function compile_dependencies() {
     case "$(_os)" in
     centos)
         # 安装 CentOS 特定的工具和开发库
-        _install bind-utils gcc-c++ perl-IPC-Cmd perl-Getopt-Long perl-Data-Dumper perl-Time-Piece
+        _install bind-utils gcc-c++ gnupg2 perl-IPC-Cmd perl-Getopt-Long perl-Data-Dumper perl-Time-Piece
         _install pcre2-devel zlib-devel libxml2-devel libxslt-devel gd-devel geoip-devel perl-ExtUtils-Embed gperftools-devel perl-devel brotli-devel
         # 检查并安装 Perl 模块 FindBin
         if ! perl -e "use FindBin" &>/dev/null; then
@@ -445,7 +578,7 @@ function compile_dependencies() {
         ;;
     debian | ubuntu)
         # 安装 Debian/Ubuntu 特定的工具和开发库
-        _install dnsutils g++ perl-base perl
+        _install dnsutils g++ gnupg perl-base perl
         _install libpcre2-dev zlib1g-dev libxml2-dev libxslt1-dev libgd-dev libgeoip-dev libgoogle-perftools-dev libperl-dev libbrotli-dev
         ;;
     esac
@@ -527,31 +660,36 @@ function gen_cflags() {
 # =============================================================================
 function source_compile() {
     cd "${TMPFILE_DIR}" # 切换到临时目录
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fetch_versions')"
-    # 从 GitHub API 获取最新的 Nginx release 标签名
-    local nginx_version="$(wget -qO- --no-check-certificate https://api.github.com/repos/nginx/nginx/tags | grep 'name' | cut -d\" -f4 | grep 'release' | head -1 | sed 's/release/nginx/')"
-    # 获取最新的 OpenSSL 标签名 (格式为 openssl-x.y.z)
-    local openssl_version="openssl-$(wget -qO- --no-check-certificate https://api.github.com/repos/openssl/openssl/tags | grep 'name' | cut -d\" -f4 | grep -Eoi '^openssl-([0-9]\.?){3}$' | head -1)"
+    ensure_nginx_user
+    resolve_build_versions
+    local nginx_version="nginx-${NGINX_BUILD_VERSION}"
+    local openssl_version="openssl-${OPENSSL_BUILD_VERSION}"
+    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fetch_versions') ${nginx_version} / ${openssl_version}"
 
     # 生成编译器优化标志
     gen_cflags
 
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.download_nginx')"
-    # 下载 Nginx 源码包
-    _error_detect "curl -fsSL -o ${nginx_version}.tar.gz https://nginx.org/download/${nginx_version}.tar.gz"
-    # 解压 Nginx 源码
-    tar -zxf "${nginx_version}.tar.gz"
+    local nginx_tarball="${TMPFILE_DIR}/${nginx_version}.tar.gz"
+    local nginx_signature="${nginx_tarball}.asc"
+    secure_curl "${nginx_tarball}" "https://nginx.org/download/${nginx_version}.tar.gz" || print_error "nginx download failed"
+    secure_curl "${nginx_signature}" "https://nginx.org/download/${nginx_version}.tar.gz.asc" || print_error "nginx signature download failed"
+    verify_sha256_file "${nginx_tarball}" "${NGINX_BUILD_SHA256}" || print_error "nginx checksum mismatch"
+    verify_nginx_signature "${nginx_tarball}" "${nginx_signature}"
+    tar -zxf "${nginx_tarball}"
 
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.download_openssl')"
-    # 下载 OpenSSL 源码包 (注意 URL 结构)
-    _error_detect "curl -fsSL -o ${openssl_version}.tar.gz https://github.com/openssl/openssl/archive/${openssl_version#*-}.tar.gz"
-    # 解压 OpenSSL 源码
-    tar -zxf "${openssl_version}.tar.gz"
+    local openssl_tarball="${TMPFILE_DIR}/${openssl_version}.tar.gz"
+    secure_curl "${openssl_tarball}" "https://github.com/openssl/openssl/releases/download/${openssl_version}/${openssl_version}.tar.gz" || print_error "openssl download failed"
+    secure_curl "${openssl_tarball}.asc" "https://github.com/openssl/openssl/releases/download/${openssl_version}/${openssl_version}.tar.gz.asc" || print_error "openssl signature download failed"
+    verify_sha256_file "${openssl_tarball}" "${OPENSSL_BUILD_SHA256}" || print_error "openssl checksum mismatch"
+    verify_detached_signature "${openssl_tarball}" "${openssl_tarball}.asc" "${PROJECT_ROOT}/config/keys/openssl-release.asc" "${OPENSSL_SIGNING_FINGERPRINT}"
+    tar -zxf "${openssl_tarball}"
 
-    # 如果启用了 Brotli，则下载并初始化 ngx_brotli 模块
+    # 如果启用了 Brotli，则按固定提交获取 ngx_brotli
     if [[ "${is_enable_brotli}" =~ ^[Yy]$ ]]; then
         print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.fetch_brotli')"
-        _error_detect "git clone https://github.com/google/ngx_brotli && cd ngx_brotli && git submodule update --init"
+        fetch_ngx_brotli "${TMPFILE_DIR}/ngx_brotli"
         cd "${TMPFILE_DIR}" # 返回临时目录
     fi
 
@@ -567,10 +705,10 @@ function source_compile() {
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.configure')"
     if [[ "${is_enable_brotli}" =~ ^[Yy]$ ]]; then
         # 如果启用 Brotli，则添加 --add-module 选项
-        ./configure --prefix="${NGINX_PATH}" --user=root --group=root --with-threads --with-file-aio --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module=dynamic --with-http_image_filter_module=dynamic --with-http_geoip_module=dynamic --with-http_sub_module --with-http_dav_module --with-http_flv_module --with-http_mp4_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module=dynamic --with-mail=dynamic --with-mail_ssl_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module --with-google_perftools_module --add-module="../ngx_brotli" --with-compat --with-cc-opt="${cflags[*]}" --with-openssl="../${openssl_version}" --with-openssl-opt="${cflags[*]}"
+        ./configure --prefix="${NGINX_PATH}" --user=${NGINX_RUN_USER} --group=${NGINX_RUN_GROUP} --with-threads --with-file-aio --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module=dynamic --with-http_image_filter_module=dynamic --with-http_geoip_module=dynamic --with-http_sub_module --with-http_dav_module --with-http_flv_module --with-http_mp4_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module=dynamic --with-mail=dynamic --with-mail_ssl_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module --with-google_perftools_module --add-module="../ngx_brotli" --with-compat --with-cc-opt="${cflags[*]}" --with-openssl="../${openssl_version}" --with-openssl-opt="${cflags[*]}"
     else
         # 不启用 Brotli
-        ./configure --prefix="${NGINX_PATH}" --user=root --group=root --with-threads --with-file-aio --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module=dynamic --with-http_image_filter_module=dynamic --with-http_geoip_module=dynamic --with-http_sub_module --with-http_dav_module --with-http_flv_module --with-http_mp4_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module=dynamic --with-mail=dynamic --with-mail_ssl_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module --with-google_perftools_module --with-compat --with-cc-opt="${cflags[*]}" --with-openssl="../${openssl_version}" --with-openssl-opt="${cflags[*]}"
+        ./configure --prefix="${NGINX_PATH}" --user=${NGINX_RUN_USER} --group=${NGINX_RUN_GROUP} --with-threads --with-file-aio --with-http_ssl_module --with-http_v2_module --with-http_v3_module --with-http_realip_module --with-http_addition_module --with-http_xslt_module=dynamic --with-http_image_filter_module=dynamic --with-http_geoip_module=dynamic --with-http_sub_module --with-http_dav_module --with-http_flv_module --with-http_mp4_module --with-http_gunzip_module --with-http_gzip_static_module --with-http_auth_request_module --with-http_random_index_module --with-http_secure_link_module --with-http_degradation_module --with-http_slice_module --with-http_stub_status_module --with-http_perl_module=dynamic --with-mail=dynamic --with-mail_ssl_module --with-stream --with-stream_ssl_module --with-stream_realip_module --with-stream_geoip_module=dynamic --with-stream_ssl_preread_module --with-google_perftools_module --with-compat --with-cc-opt="${cflags[*]}" --with-openssl="../${openssl_version}" --with-openssl-opt="${cflags[*]}"
     fi
 
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.compile.swap')"
@@ -591,8 +729,8 @@ function source_compile() {
 function source_install() {
     source_compile # 先执行编译
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.install.start_install')"
-    make install                                      # 执行安装 (将文件复制到 --prefix 指定的目录)
-    mkdir -p /var/log/nginx                           # 创建日志目录
+    make install # 执行安装 (将文件复制到 --prefix 指定的目录)
+    ensure_nginx_runtime
     ln -sf "${NGINX_PATH}/sbin/nginx" /usr/sbin/nginx # 创建软链接以便全局使用 nginx 命令
 }
 
@@ -603,10 +741,8 @@ function source_install() {
 # 返回值: 0-执行了更新 1-无需更新 (由 return 语句决定)
 # =============================================================================
 function source_update() {
-    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.fetch_versions')"
-    # 获取最新的版本号
-    local latest_nginx_version="$(wget -qO- --no-check-certificate https://api.github.com/repos/nginx/nginx/tags | grep 'name' | cut -d\" -f4 | grep 'release' | head -1 | sed 's/release/nginx/')"
-    local latest_openssl_version="$(wget -qO- --no-check-certificate https://api.github.com/repos/openssl/openssl/tags | grep 'name' | cut -d\" -f4 | grep -Eoi '^openssl-([0-9]\.?){3}$' | head -1)"
+    resolve_build_versions
+    print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.fetch_versions') ${NGINX_BUILD_VERSION} / ${OPENSSL_BUILD_VERSION}"
 
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.read_current_versions')"
     # 获取当前安装的 Nginx 和 OpenSSL 版本
@@ -614,9 +750,10 @@ function source_update() {
     local current_version_openssl="$(nginx -V 2>&1 | grep "^built with OpenSSL" | awk '{print $4}')"
 
     print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.check_update')"
-    # 使用 _version_ge 函数比较版本，如果任一组件有新版本则进行更新
-    if _version_ge "${latest_nginx_version#*-}" "${current_version_nginx}" || _version_ge "${latest_openssl_version#*-}" "${current_version_openssl}"; then
+    # 只在钉扎版本高于已安装版本时重编译，避免定时任务重复构建同一版本
+    if _version_gt "${NGINX_BUILD_VERSION}" "${current_version_nginx}" || _version_gt "${OPENSSL_BUILD_VERSION}" "${current_version_openssl}"; then
         source_compile # 重新编译新版本
+        ensure_nginx_runtime
         print_info "$(echo "$I18N_DATA" | jq -r '.nginx.update.start_update')"
         # 备份旧的 nginx 二进制文件
         mv "${NGINX_PATH}/sbin/nginx" "${NGINX_PATH}/sbin/nginx_$(date +%F)"
@@ -687,10 +824,10 @@ Type=forking
 PIDFile=/run/nginx.pid
 # 清理并创建共享内存目录用于 tcmalloc
 ExecStartPre=/bin/rm -rf /dev/shm/nginx
-ExecStartPre=/bin/mkdir /dev/shm/nginx
+ExecStartPre=/bin/mkdir -p /dev/shm/nginx/tcmalloc
+ExecStartPre=/bin/chown nginx:nginx /dev/shm/nginx /dev/shm/nginx/tcmalloc
 ExecStartPre=/bin/chmod 711 /dev/shm/nginx
-ExecStartPre=/bin/mkdir /dev/shm/nginx/tcmalloc
-ExecStartPre=/bin/chmod 0777 /dev/shm/nginx/tcmalloc
+ExecStartPre=/bin/chmod 0750 /dev/shm/nginx/tcmalloc
 # 测试配置文件
 ExecStartPre=/usr/sbin/nginx -t -q -g 'daemon on; master_process on;'
 # 启动 Nginx
