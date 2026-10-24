@@ -430,10 +430,11 @@ function script_ref() {
 # 功能描述: 运行时禁止任何指向原上游仓库的地址。
 # =============================================================================
 function forbid_upstream_url() {
-    local url="$1"
+    local url="${1,,}"
 
+    # 大小写折叠后匹配。ZxCvOs/xRaY-sCrIpT 和 api.github.com tarball/zipball 一样拒绝。
     case "${url}" in
-    *zxcvos* | *ZXCVOS*) _error "${I18N_DATA['refused']}" ;;
+    *zxcvos*) _error "${I18N_DATA['refused']}" ;;
     esac
 }
 

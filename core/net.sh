@@ -160,6 +160,13 @@ detect_ipv6() {
 secure_lookup_ip() {
     local url="$1"
     local body
+    local folded="${url,,}"
+
+    case "${folded}" in
+    *zxcvos*) return 1 ;;
+    https://*) ;;
+    *) return 1 ;;
+    esac
 
     body="$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --max-time 8 "${url}" | tr -d '[:space:]')"
     [[ -n "${body}" ]] || return 1

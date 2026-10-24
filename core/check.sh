@@ -747,6 +747,12 @@ function check_xray_version_exists() {
 
     # 构造 GitHub Releases 页面的 URL
     local version_url="https://github.com/XTLS/Xray-core/releases/tag/v${version#*v}"
+    local folded="${version_url,,}"
+
+    # 版本号会拼进 URL。任何大小写的 zxcvos 都不访问。
+    case "${folded}" in
+    *zxcvos*) return 1 ;;
+    esac
 
     # 使用 curl 获取页面的 HTTP 状态码
     local status_code

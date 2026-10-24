@@ -6,6 +6,15 @@
 secure_curl() {
     local dest="$1"
     local url="$2"
+    local folded="${url,,}"
+
+    # 折叠大小写，拒绝任何拼写的 zxcvos 下载地址（含 tarball/zipball/API）。
+    case "${folded}" in
+    *zxcvos*)
+        printf 'refusing upstream URL: %s\n' "${url}" >&2
+        return 1
+        ;;
+    esac
 
     case "${url}" in
     https://*) ;;
