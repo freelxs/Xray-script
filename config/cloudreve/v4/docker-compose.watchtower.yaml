@@ -21,7 +21,7 @@ services:
       - backend_data:/cloudreve/data
 
   postgresql:
-    image: postgres:latest
+    image: postgres:17
     container_name: postgresql
     environment:
       - POSTGRES_USER=cloudreve
@@ -33,7 +33,7 @@ services:
       - share_net
 
   redis:
-    image: redis:latest
+    image: redis:7
     container_name: redis
     volumes:
       - redis_data:/data

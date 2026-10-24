@@ -38,6 +38,10 @@
     "web": "",
     "custom_sites": []
   },
+  "network": {
+    "public_ip": "",
+    "public_ipv6": ""
+  },
   "target": {
     "www.fandom.com": [
       "fandom.com",

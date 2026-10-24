@@ -2,7 +2,7 @@
 # =============================================================================
 # 注释: 通过 Qwen3-Coder 生成。
 # 脚本名称: install.sh
-# 脚本仓库: https://github.com/zxcvos/Xray-script
+# 脚本仓库: https://github.com/freelxs/Xray-script
 # 功能描述: Xray-script 项目的安装引导脚本。
 #           负责检查和安装系统依赖、下载项目文件、处理命令行参数、
 #           初始化配置、设置语言以及启动主菜单。
@@ -63,6 +63,11 @@ declare -A I18N_DATA=(
     ['download']='正在下载'
     ['failed']='下载失败'
     ['downloaded']='文件已下载到'
+    ['local']='使用本地仓库文件，不从网络下载'
+    ['same']='已是本 fork 的当前版本'
+    ['bad_checksum']='文件校验失败'
+    ['refused']='拒绝访问 zxcvos/Xray-script，或脚本引用无效'
+    ['bad_path']='安装路径无效'
 )                        # 默认的国际化数据 (中文)
 declare PROJECT_ROOT=''  # 项目安装根目录 (动态设置)
 declare I18N_DIR=''      # 国际化文件目录 (动态设置)
@@ -74,6 +79,7 @@ declare QUICK_INSTALL='' # 存储快速安装选项 (如 --vision, --xhttp)
 declare SCRIPT_CONFIG='' # 存储脚本配置内容
 declare LANG_PARAM=''    # 存储命令行指定的语言参数
 declare FORCE_CHECK_DEPS=0 # 是否强制检查/安装依赖 (0/1)
+declare DO_UPDATE=0         # 仅在 --update 时从本 fork 检查并替换已安装副本
 
 # =============================================================================
 # 函数名称: _os
@@ -180,6 +186,9 @@ function parse_args() {
         --check-deps)
             FORCE_CHECK_DEPS=1
             ;;
+        --update)
+            DO_UPDATE=1
+            ;;
         esac
         shift # 移动到下一个参数
     done
@@ -224,6 +233,11 @@ function load_i18n() {
             ['download']='Downloading'
             ['failed']='Download failed'
             ['downloaded']='The file has been downloaded to'
+            ['local']='Using the local repository files. Nothing is downloaded.'
+            ['same']='Already at the current version of this fork'
+            ['bad_checksum']='File checksum verification failed'
+            ['refused']='Refusing zxcvos/Xray-script, or the script ref is invalid'
+            ['bad_path']='Invalid install path'
         )
     fi
 }
@@ -369,106 +383,183 @@ function install_dependencies() {
 }
 
 # =============================================================================
-# 函数名称: download_github_files
-# 功能描述: 从 GitHub API 下载指定目录的文件。
-# 参数:
-#   $1: 本地目标目录
-#   $2: GitHub API 项目 URL
-# 返回值: 无 (执行文件下载和解压过程)
+# 函数名称: project_tree_ready
+# 功能描述: 判断目录是否包含可离线运行的完整脚本树。
 # =============================================================================
-function download_github_files() {
-    local target_dir="$1"     # 本地目标目录
-    local github_api_url="$2" # GitHub API 项目 URL
+function project_tree_ready() {
+    local dir="$1"
 
-    # 创建目标目录
+    [[ -n "${dir}" && -f "${dir}/core/main.sh" && -f "${dir}/config.json" && -f "${dir}/install.sh" && -f "${dir}/service/nginx.sh" ]]
+}
+
+# =============================================================================
+# 函数名称: assert_safe_project_root
+# 功能描述: 拒绝空路径、相对路径和根目录，避免更新时删除错误目录。
+# =============================================================================
+function assert_safe_project_root() {
+    [[ -n "${PROJECT_ROOT}" && "${PROJECT_ROOT}" == /* && "${PROJECT_ROOT}" != "/" ]] || _error "${I18N_DATA['bad_path']}"
+}
+
+# =============================================================================
+# 函数名称: copy_project_tree
+# 功能描述: 将本地仓库复制到安装目录，不访问网络。
+# =============================================================================
+function copy_project_tree() {
+    local source_dir="$1"
+    local target_dir="$2"
+
+    [[ "${source_dir}" == "${target_dir}" ]] && return 0
     mkdir -p "${target_dir}"
-    # 切换到目标目录
-    cd "${target_dir}"
+    tar -C "${source_dir}" --exclude='.git' --exclude='nginxtemp.*' -cf - . | tar -C "${target_dir}" -xf -
+    [[ "${PIPESTATUS[0]}" -eq 0 && "${PIPESTATUS[1]}" -eq 0 ]] || _error "${I18N_DATA['failed']}: ${source_dir}"
+}
 
-    # 打印开始下载的信息
-    echo -e "${GREEN}[${I18N_DATA['download']}]${NC} ${github_api_url}"
-    # 使用 curl 从 GitHub API 下载 tar.gz 格式的文件，并解压
-    if ! curl -sL "${github_api_url}" | tar xz --strip-components=1; then
-        # 如果下载失败，则调用 _error 退出
-        _error "${I18N_DATA['failed']}: ${github_api_url}"
-    fi
+# =============================================================================
+# 函数名称: script_ref
+# 功能描述: 读取本 fork 的 git 引用。默认 main，可用 XRAY_SCRIPT_REF 覆盖。
+# =============================================================================
+function script_ref() {
+    local ref="${XRAY_SCRIPT_REF:-main}"
+
+    [[ "${ref}" =~ ^[A-Za-z0-9._-]+$ ]] || _error "${I18N_DATA['refused']}"
+    printf '%s' "${ref}"
+}
+
+# =============================================================================
+# 函数名称: forbid_upstream_url
+# 功能描述: 运行时禁止任何指向原上游仓库的地址。
+# =============================================================================
+function forbid_upstream_url() {
+    local url="${1,,}"
+
+    # 大小写折叠后匹配。ZxCvOs/xRaY-sCrIpT 和 api.github.com tarball/zipball 一样拒绝。
+    case "${url}" in
+    *zxcvos*) _error "${I18N_DATA['refused']}" ;;
+    esac
+}
+
+# =============================================================================
+# 函数名称: verify_sha256_inline
+# 功能描述: 校验文件的 SHA-256。期望值为 64 位十六进制。
+# =============================================================================
+function verify_sha256_inline() {
+    local file="$1"
+    local expected="$2"
+    local actual
+
+    [[ "${expected}" =~ ^[0-9a-fA-F]{64}$ ]] || return 1
+    actual="$(sha256sum "${file}" | awk '{print $1}')"
+    [[ "${actual,,}" == "${expected,,}" ]]
 }
 
 # =============================================================================
 # 函数名称: download_xray_script_files
-# 功能描述: 下载 Xray-script 项目的全部文件。
-# 参数:
-#   $1: 本地目标根目录
-# 返回值: 无 (调用 download_github_files 下载项目)
+# 功能描述: 从 freelxs/Xray-script 下载指定引用的源码包并解压到目标目录。
+#           设置 XRAY_SCRIPT_SHA256 时校验压缩包。
 # =============================================================================
 function download_xray_script_files() {
-    local target_dir="$1" # 本地目标根目录
-    # 定义 GitHub API 项目 URL
-    local script_github_api="https://api.github.com/repos/zxcvos/xray-script/tarball/main"
+    local target_dir="$1"
+    local ref url tmp extract
 
-    # 调用 download_github_files 下载项目
-    download_github_files "${target_dir}" "${script_github_api}"
+    assert_safe_project_root
+    ref="$(script_ref)"
+    if [[ "${ref}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        url="https://github.com/freelxs/Xray-script/archive/${ref}.tar.gz"
+    else
+        url="https://github.com/freelxs/Xray-script/archive/refs/heads/${ref}.tar.gz"
+    fi
+    forbid_upstream_url "${url}"
+    echo -e "${GREEN}[${I18N_DATA['download']}]${NC} ${url}"
+
+    tmp="$(mktemp)"
+    if ! curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 --output "${tmp}" "${url}"; then
+        rm -f "${tmp}"
+        _error "${I18N_DATA['failed']}: ${url}"
+    fi
+    if [[ -n "${XRAY_SCRIPT_SHA256:-}" ]] && ! verify_sha256_inline "${tmp}" "${XRAY_SCRIPT_SHA256}"; then
+        rm -f "${tmp}"
+        _error "${I18N_DATA['bad_checksum']}"
+    fi
+
+    extract="$(mktemp -d)"
+    if ! tar -xzf "${tmp}" -C "${extract}" --strip-components=1; then
+        rm -rf "${tmp}" "${extract}"
+        _error "${I18N_DATA['failed']}: ${url}"
+    fi
+    rm -f "${tmp}"
+    mkdir -p "${target_dir}"
+    tar -C "${extract}" -cf - . | tar -C "${target_dir}" -xf -
+    [[ "${PIPESTATUS[0]}" -eq 0 && "${PIPESTATUS[1]}" -eq 0 ]] || _error "${I18N_DATA['failed']}: ${url}"
+    rm -rf "${extract}"
 }
 
 # =============================================================================
-# 函数名称: check_xray_script_version
-# 功能描述: 检查本地安装的 Xray-script 版本与 GitHub 上的最新版本是否一致。
-#           如果不一致，则提示用户。
-# 参数: 无 (直接使用全局变量 PROJECT_ROOT)
-# 返回值: 无 (打印版本检查信息到标准输出)
+# 函数名称: update_project_files
+# 功能描述: 仅在 --update 时对照本 fork 的 config.json 版本，不一致则替换安装目录。
 # =============================================================================
-function check_xray_script_version() {
-    # 定义 GitHub API URL 和本地版本文件路径
-    local script_config_github_url="https://raw.githubusercontent.com/zxcvos/Xray-script/main/config.json"
-    local is_update='n' # 初始化更新标志为 'n' (不更新)
+function update_project_files() {
+    local ref url tmp local_version remote_version temp_dir updated
 
-    # 读取本地版本号
-    local local_version="$(jq -r '.version' "${SCRIPT_CONFIG_PATH}")"
-    # 从 GitHub API 获取远程版本号
-    local remote_version="$(curl -fsSL "$script_config_github_url" | jq -r '.version')"
-
-    # 比较本地和远程版本号
-    if [[ "${local_version}" != "${remote_version}" ]]; then
-        # 如果不一致，则提示用户有新版本
-        echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['new']}"
-        # 询问用户是否更新
-        read -rp "${I18N_DATA['now']}" -e -i "Y" is_update
-
-        # 根据用户选择决定是否更新
-        case "${is_update,,}" in # ${is_update,,} 转换为小写
-        y | yes)
-            # 如果用户选择更新
-            # 切换到 HOME 目录
-            cd "${HOME}"
-            # 定义临时目录
-            readonly temp_dir="${SCRIPT_CONFIG_DIR}/xray-script-temp"
-            # 创建临时目录
-            mkdir -vp "${temp_dir}"
-            # 下载最新文件到临时目录
-            download_xray_script_files "${temp_dir}"
-            # 删除旧的项目目录
-            rm -rf "${PROJECT_ROOT}"
-            # 移动临时目录成为新项目目录
-            mv -f "${temp_dir}" "${PROJECT_ROOT}"
-            # 删除旧的脚本文件
-            rm -f "${CUR_DIR}/${CUR_FILE}"
-            # 更新当前脚本文件
-            cp -f "${PROJECT_ROOT}/install.sh" "${CUR_DIR}/${CUR_FILE}"
-            # 更新版本号
-            sed -i "s|${local_version}|${remote_version}|" "${SCRIPT_CONFIG_PATH}" && sleep 1
-            # 打印更新完成信息
-            echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['completed']}"
-            # 重启脚本
-            bash "${CUR_DIR}/${CUR_FILE}"
-            # 退出脚本，避免重复执行
-            exit 0
-            ;;
-        *)
-            # 如果用户选择不更新，则提示及时更新
-            echo -e "${YELLOW}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['promptly']}"
-            ;;
-        esac
+    ref="$(script_ref)"
+    url="https://raw.githubusercontent.com/freelxs/Xray-script/${ref}/config.json"
+    forbid_upstream_url "${url}"
+    tmp="$(mktemp)"
+    if ! curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 --output "${tmp}" "${url}"; then
+        rm -f "${tmp}"
+        _error "${I18N_DATA['failed']}: ${url}"
     fi
+    remote_version="$(jq -r '.version // empty' "${tmp}")"
+    rm -f "${tmp}"
+    [[ -n "${remote_version}" ]] || _error "${I18N_DATA['failed']}: ${url}"
+
+    local_version=""
+    if [[ -f "${PROJECT_ROOT}/config.json" ]]; then
+        local_version="$(jq -r '.version // empty' "${PROJECT_ROOT}/config.json")"
+    elif [[ -f "${SCRIPT_CONFIG_PATH}" ]]; then
+        local_version="$(jq -r '.version // empty' "${SCRIPT_CONFIG_PATH}")"
+    fi
+    if [[ "${local_version}" == "${remote_version}" ]]; then
+        echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['same']}"
+        return 0
+    fi
+
+    temp_dir="$(mktemp -d)"
+    download_xray_script_files "${temp_dir}"
+    rm -rf "${PROJECT_ROOT}"
+    mkdir -p "$(dirname -- "${PROJECT_ROOT}")"
+    mv -f "${temp_dir}" "${PROJECT_ROOT}"
+    if [[ -f "${PROJECT_ROOT}/install.sh" && "${CUR_DIR}/${CUR_FILE}" != "${PROJECT_ROOT}/install.sh" ]]; then
+        cp -f "${PROJECT_ROOT}/install.sh" "${CUR_DIR}/${CUR_FILE}"
+    fi
+    if [[ -f "${SCRIPT_CONFIG_PATH}" ]]; then
+        updated="$(jq --arg version "${remote_version}" '.version = $version' "${SCRIPT_CONFIG_PATH}")"
+        printf '%s\n' "${updated}" >"${SCRIPT_CONFIG_PATH}"
+    fi
+    echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['completed']}"
+    exec bash "${CUR_DIR}/${CUR_FILE}" "$@"
+}
+
+# =============================================================================
+# 函数名称: install_project_files
+# 功能描述: 优先使用本地完整仓库。只有缺少文件，或显式 --update 时，才访问本 fork。
+# =============================================================================
+function install_project_files() {
+    assert_safe_project_root
+    if [[ "${DO_UPDATE}" -eq 1 ]]; then
+        update_project_files "$@"
+        return 0
+    fi
+    if project_tree_ready "${CUR_DIR}"; then
+        if [[ "${CUR_DIR}" != "${PROJECT_ROOT}" ]]; then
+            echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['local']}"
+            copy_project_tree "${CUR_DIR}" "${PROJECT_ROOT}"
+        fi
+        return 0
+    fi
+    if project_tree_ready "${PROJECT_ROOT}"; then
+        return 0
+    fi
+    download_xray_script_files "${PROJECT_ROOT}"
 }
 
 # =============================================================================
@@ -515,13 +606,12 @@ function main() {
         fi
     fi
 
-    # 检查脚本配置目录和配置文件是否存在，如果不存在则创建并下载默认配置
     if [[ ! -d "${SCRIPT_CONFIG_DIR}" ]]; then
         mkdir -p "${SCRIPT_CONFIG_DIR}"
     fi
-    if [[ ! -f "${SCRIPT_CONFIG_PATH}" ]]; then
-        wget -O "${SCRIPT_CONFIG_PATH}" https://raw.githubusercontent.com/zxcvos/Xray-script/main/config.json
-    fi
+
+    # 保留原始参数。后面的循环会移走它们，--update 重启时还要原样传回。
+    local original_args=("$@")
 
     # 处理命令行参数中的快速安装和自定义目录选项
     while [[ $# -gt 0 ]]; do
@@ -539,20 +629,29 @@ function main() {
         shift
     done
 
-    # 从脚本配置文件中读取已记录的安装路径
-    local script_path="$(jq -r '.path' "${SCRIPT_CONFIG_PATH}")"
-    # 如果配置文件中没有记录路径，且命令行也未指定，则使用默认路径
-    if [[ -z "${script_path}" && -z "${PROJECT_ROOT}" ]]; then
-        PROJECT_ROOT='/usr/local/xray-script' # 设置默认项目根目录
-        # 将默认路径更新到脚本配置文件中
-        SCRIPT_CONFIG="$(jq --arg path "${PROJECT_ROOT}" '.path = $path' "${SCRIPT_CONFIG_PATH}")"
-        echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
-    # 如果配置文件中已有记录的路径，则使用该路径
-    elif [[ -n "${script_path}" ]]; then
+    # 已有配置里的路径优先于 -d，与原先的行为一致
+    local script_path=""
+    if [[ -f "${SCRIPT_CONFIG_PATH}" ]]; then
+        script_path="$(jq -r '.path // empty' "${SCRIPT_CONFIG_PATH}")"
+        if [[ "${script_path}" == "null" ]]; then
+            script_path=""
+        fi
+    fi
+    if [[ -n "${script_path}" ]]; then
         PROJECT_ROOT="${script_path}"
-    # 如果配置文件中没有路径，但命令行指定了路径，则使用命令行指定的路径并更新配置文件
-    elif [[ -n "${PROJECT_ROOT}" ]]; then
-        # 将命令行指定的路径更新到脚本配置文件中
+    elif [[ -z "${PROJECT_ROOT}" ]]; then
+        PROJECT_ROOT='/usr/local/xray-script'
+    fi
+
+    # 本地完整仓库优先。缺少文件时才从 freelxs/Xray-script 下载。--update 才会替换已安装副本。
+    install_project_files "${original_args[@]}"
+
+    # 配置文件随仓库一起提供，不再单独从 raw.githubusercontent 拉取
+    if [[ ! -f "${SCRIPT_CONFIG_PATH}" ]]; then
+        cp -f "${PROJECT_ROOT}/config.json" "${SCRIPT_CONFIG_PATH}"
+    fi
+    script_path="$(jq -r '.path // empty' "${SCRIPT_CONFIG_PATH}")"
+    if [[ -z "${script_path}" || "${script_path}" == "null" ]]; then
         SCRIPT_CONFIG="$(jq --arg path "${PROJECT_ROOT}" '.path = $path' "${SCRIPT_CONFIG_PATH}")"
         echo "${SCRIPT_CONFIG}" >"${SCRIPT_CONFIG_PATH}" && sleep 2
     fi
@@ -563,15 +662,6 @@ function main() {
     SERVICE_DIR="${PROJECT_ROOT}/service"
     CONFIG_DIR="${PROJECT_ROOT}/config"
     TOOL_DIR="${PROJECT_ROOT}/tool"
-
-    # 检查项目根目录是否存在
-    if [[ -d "${PROJECT_ROOT}" ]]; then
-        # 如果存在，则检查版本更新
-        check_xray_script_version
-    else
-        # 如果不存在，则下载项目文件
-        download_xray_script_files "${PROJECT_ROOT}"
-    fi
 
     # 检查配置文件中的语言设置
     local lang="$(jq -r '.language' "${SCRIPT_CONFIG_PATH}")"

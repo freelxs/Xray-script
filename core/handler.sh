@@ -3,7 +3,7 @@
 # Copyright (C) 2025 zxcvos
 #
 # Xray-script:
-#   https://github.com/zxcvos/Xray-script
+#   https://github.com/freelxs/Xray-script
 # =============================================================================
 # 注释: 通过 Qwen3-Coder 生成。
 # 脚本名称: handler.sh
@@ -42,6 +42,12 @@ readonly NC='\033[0m'      # 无颜色（重置）
 readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)" # 当前脚本所在目录
 readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"         # 当前脚本文件名 (不含扩展名)
 readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
+# shellcheck source=secure_fetch.sh
+source "${CUR_DIR}/secure_fetch.sh"
+
+# XTLS/Xray-install install-release.sh at e741a4f56d368afbb9e5be3361b40c4552d3710d
+readonly XRAY_INSTALL_COMMIT="e741a4f56d368afbb9e5be3361b40c4552d3710d"
+readonly XRAY_INSTALL_SHA256="7f70c95f6b418da8b4f4883343d602964915e28748993870fd554383afdbe555"
 
 # 定义项目内相关目录和脚本的路径
 readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script" # 主配置文件目录
@@ -127,6 +133,37 @@ function _error() {
     printf "\n" >&2
     # 退出脚本，错误码为 1
     exit 1
+}
+
+# 下载钉扎的 Xray 安装脚本，校验后再执行。参数原样传给该脚本。
+function run_xray_install() {
+    local work script status
+
+    work="$(mktemp -d)"
+    script="${work}/install-release.sh"
+    fetch_verified \
+        "https://raw.githubusercontent.com/XTLS/Xray-install/${XRAY_INSTALL_COMMIT}/install-release.sh" \
+        "${script}" \
+        "${XRAY_INSTALL_SHA256}" || _error "Xray installer download or checksum failed"
+    chmod 0700 "${script}"
+    bash "${script}" "$@"
+    status=$?
+    rm -rf "${work}"
+    [[ "${status}" -eq 0 ]] || _error "Xray installer failed"
+}
+
+# 读取 GitHub API，只允许 HTTPS。
+function github_api_json() {
+    local url="$1"
+    local tmp
+
+    tmp="$(mktemp)"
+    secure_curl "${tmp}" "${url}" || {
+        rm -f "${tmp}"
+        return 1
+    }
+    cat "${tmp}"
+    rm -f "${tmp}"
 }
 
 # =============================================================================
@@ -1402,7 +1439,7 @@ function handler_xray_version() {
     case "${xray_version,,}" in
     latest)
         # 获取最新的 Xray 版本
-        CONFIG_DATA['version']="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases | jq -r '.[0].tag_name')"
+        CONFIG_DATA['version']="$(github_api_json "https://api.github.com/repos/XTLS/Xray-core/releases" | jq -r '.[0].tag_name')"
         ;;
     custom)
         # 读取用户自定义的版本
@@ -1410,7 +1447,7 @@ function handler_xray_version() {
         ;;
     *)
         # 获取最新的 release 版本
-        CONFIG_DATA['version']="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name')"
+        CONFIG_DATA['version']="$(github_api_json "https://api.github.com/repos/XTLS/Xray-core/releases/latest" | jq -r '.tag_name')"
         ;;
     esac
     # 更新脚本配置中的 Xray 版本
@@ -1476,7 +1513,7 @@ function handler_install() {
     # 检查 Xray 命令是否存在，或是否强制安装
     if ! cmd_exists 'xray' || [[ "${force_install}" != n ]]; then
         # 调用 Xray-install 脚本进行安装
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root --version "${CONFIG_DATA['version']}"
+        run_xray_install install -u root --version "${CONFIG_DATA['version']}"
     fi
 }
 
@@ -1488,7 +1525,7 @@ function handler_install() {
 # =============================================================================
 function handler_purge() {
     # 调用 Xray-install 脚本进行卸载 (带 --purge 参数)
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge
+    run_xray_install remove --purge
     # 重置 xray 字段
     SCRIPT_CONFIG=$(reset_json_fields "${SCRIPT_CONFIG}" 'xray')
     # 将重置后的脚本配置写入文件

@@ -3,7 +3,7 @@
 # Copyright (C) 2025 zxcvos
 #
 # Xray-script:
-#   https://github.com/zxcvos/Xray-script
+#   https://github.com/freelxs/Xray-script
 # =============================================================================
 # 注释: 通过 Qwen3-Coder 生成。
 # 脚本名称: check.sh
@@ -36,6 +36,8 @@ readonly NC='\033[0m'      # 无颜色（重置）
 readonly CUR_DIR="$(cd -P -- "$(dirname -- "$0")" && pwd -P)" # 当前脚本所在目录
 readonly CUR_FILE="$(basename "$0" | sed 's/\..*//')"         # 当前脚本文件名 (不含扩展名)
 readonly PROJECT_ROOT="$(cd -P -- "${CUR_DIR}/.." && pwd -P)" # 项目根目录
+# shellcheck source=net.sh
+source "${CUR_DIR}/net.sh"
 
 # 定义配置文件和相关目录的路径
 readonly SCRIPT_CONFIG_DIR="${HOME}/.xray-script"              # 主配置文件目录
@@ -205,24 +207,29 @@ function resolve_domain() {
 # =============================================================================
 function dns_resolution() {
     local domain=$1 # 获取域名参数
+    local candidates resolved ip
 
-    # 获取当前服务器的公网 IPv4 和 IPv6 地址
-    local expected_ipv4="$(curl -fsSL ipv4.icanhazip.com)"
-    local expected_ipv6="$(curl -fsSL ipv6.icanhazip.com)"
+    # 默认只比较本机地址和用户配置的地址，不向第三方查询公网 IP。
+    candidates="$(address_candidates | sed '/^$/d' | sort -u)"
+    if [[ -z "${candidates}" ]]; then
+        printf '%s\n' "$(echo "$I18N_DATA" | jq -r ".${CUR_FILE}.dns.no_address")" >&2
+        return 1
+    fi
 
-    local resolved=0 # 初始化标志变量，表示是否匹配
-
-    # 解析域名的 IPv4 和 IPv6 记录
-    local actual_ipv4="$(dig +short "${domain}")"
-    local actual_ipv6="$(dig +short AAAA "${domain}")"
-
-    # 检查解析到的 IPv4 是否包含服务器的 IPv4
-    if [[ ${actual_ipv4} =~ ${expected_ipv4} ]]; then resolved=1; fi
-    # 检查解析到的 IPv6 是否包含服务器的 IPv6
-    if [[ ${actual_ipv6} =~ ${expected_ipv6} ]]; then resolved=1; fi
-
-    # 根据 resolved 标志返回结果
-    [[ ${resolved} -eq 1 ]]
+    resolved="$(
+        {
+            dig +short A "${domain}"
+            dig +short AAAA "${domain}"
+        } 2>/dev/null || true
+    )"
+    while read -r ip; do
+        [[ -z "${ip}" ]] && continue
+        [[ "${ip}" == *.* || "${ip}" == *:* ]] || continue
+        if grep -Fxq "${ip}" <<<"${candidates}"; then
+            return 0
+        fi
+    done <<<"${resolved}"
+    return 1
 }
 
 # =============================================================================
@@ -740,9 +747,16 @@ function check_xray_version_exists() {
 
     # 构造 GitHub Releases 页面的 URL
     local version_url="https://github.com/XTLS/Xray-core/releases/tag/v${version#*v}"
+    local folded="${version_url,,}"
+
+    # 版本号会拼进 URL。任何大小写的 zxcvos 都不访问。
+    case "${folded}" in
+    *zxcvos*) return 1 ;;
+    esac
 
     # 使用 curl 获取页面的 HTTP 状态码
-    local status_code=$(curl -L -o /dev/null -s -w '%{http_code}\n' "$version_url")
+    local status_code
+    status_code="$(curl --proto '=https' --tlsv1.2 --silent --show-error --location --output /dev/null --write-out '%{http_code}' "${version_url}")"
 
     # 检查状态码是否为 200 (OK)
     if [[ "$status_code" == "200" ]]; then

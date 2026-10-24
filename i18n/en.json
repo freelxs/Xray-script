@@ -213,7 +213,9 @@
     "client": "Client Configuration",
     "extra": "XHTTP Extra Config",
     "link": "Share Link",
-    "qr": "QR Code"
+    "qr": "QR Code",
+    "address_missing": "No local address for the share link. Set network.public_ip or XRAY_SCRIPT_PUBLIC_IP. External lookup stays off unless XRAY_SCRIPT_IP_LOOKUP=1.",
+    "address_private": "Share link address is not a public IP. Set network.public_ip or XRAY_SCRIPT_PUBLIC_IP if clients connect from the internet. External lookup stays off unless XRAY_SCRIPT_IP_LOOKUP=1."
   },
   "check": {
     "ip": {
@@ -296,6 +298,7 @@
     "dns": {
       "check_start": "Checking if domain resolves to this host: ",
       "resolution_fail": "Domain resolution failed: ",
+      "no_address": "No local or configured address to compare. Set network.public_ip or XRAY_SCRIPT_PUBLIC_IP. Optional lookup: XRAY_SCRIPT_IP_LOOKUP=1.",
       "check_pass": "Domain ${domain} DNS check passed"
     },
     "config": {
@@ -460,9 +463,9 @@
   "nginx": {
     "compile": {
       "install_deps": "Installing compilation dependencies...",
-      "fetch_versions": "Fetching the latest versions of Nginx and OpenSSL.",
-      "download_nginx": "Downloading the latest version of Nginx.",
-      "download_openssl": "Downloading the latest version of OpenSSL.",
+      "fetch_versions": "Using pinned Nginx and OpenSSL versions:",
+      "download_nginx": "Downloading the pinned Nginx source and verifying its signature.",
+      "download_openssl": "Downloading the pinned OpenSSL source and verifying its checksum.",
       "fetch_brotli": "Fetching ngx_brotli and building dependencies.",
       "configure": "Configuring Nginx compilation options.",
       "swap": "Allocating 512MB of virtual memory.",
@@ -474,7 +477,7 @@
       "start_install": "Installing Nginx."
     },
     "update": {
-      "fetch_versions": "Fetching the latest versions of Nginx and OpenSSL.",
+      "fetch_versions": "Pinned Nginx and OpenSSL versions:",
       "read_current_versions": "Reading the current versions of Nginx and OpenSSL.",
       "check_update": "Checking if an update is needed.",
       "start_update": "Updating Nginx.",
