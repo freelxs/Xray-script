@@ -68,6 +68,8 @@ declare -A I18N_DATA=(
     ['bad_checksum']='文件校验失败'
     ['refused']='拒绝访问 zxcvos/Xray-script，或脚本引用无效'
     ['bad_path']='安装路径无效'
+    ['backup']='已备份旧脚本目录到'
+    ['replaced']='安装目录不是 freelxs/Xray-script，已替换为本 fork'
 )                        # 默认的国际化数据 (中文)
 declare PROJECT_ROOT=''  # 项目安装根目录 (动态设置)
 declare I18N_DIR=''      # 国际化文件目录 (动态设置)
@@ -80,6 +82,7 @@ declare SCRIPT_CONFIG='' # 存储脚本配置内容
 declare LANG_PARAM=''    # 存储命令行指定的语言参数
 declare FORCE_CHECK_DEPS=0 # 是否强制检查/安装依赖 (0/1)
 declare DO_UPDATE=0         # 仅在 --update 时从本 fork 检查并替换已安装副本
+declare LAST_PROJECT_BACKUP='' # 最近一次安装目录备份路径
 
 # =============================================================================
 # 函数名称: _os
@@ -238,6 +241,8 @@ function load_i18n() {
             ['bad_checksum']='File checksum verification failed'
             ['refused']='Refusing zxcvos/Xray-script, or the script ref is invalid'
             ['bad_path']='Invalid install path'
+            ['backup']='Backed up the previous script directory to'
+            ['replaced']='Install directory was not freelxs/Xray-script and was replaced with this fork'
         )
     fi
 }
@@ -392,6 +397,96 @@ function project_tree_ready() {
     [[ -n "${dir}" && -f "${dir}/core/main.sh" && -f "${dir}/config.json" && -f "${dir}/install.sh" && -f "${dir}/service/nginx.sh" ]]
 }
 
+# 目录里是否有指向原上游仓库的地址。纯文本和 banner 的 base64 都检查。
+function tree_has_upstream_url() {
+    local dir="$1"
+    local file blob decoded owner pattern needle raw_needle api_needle
+
+    [[ -d "${dir}" ]] || return 1
+    # 拼出上游名字，避免本文件里出现完整地址，否则扫描会把自己判成上游。
+    owner="zxcvos"
+    pattern="github\\.com/${owner}|githubusercontent\\.com/${owner}|api\\.github\\.com/repos/${owner}"
+    needle="github.com/${owner}"
+    raw_needle="githubusercontent.com/${owner}"
+    api_needle="api.github.com/repos/${owner}"
+    if grep -R -I -i -q -E "${pattern}" -- "${dir}"; then
+        return 0
+    fi
+    while IFS= read -r -d '' file; do
+        while IFS= read -r blob; do
+            [[ -n "${blob}" ]] || continue
+            decoded="$(printf '%s' "${blob}" | base64 -d 2>/dev/null || true)"
+            decoded="${decoded,,}"
+            case "${decoded}" in
+            *"${needle}"* | *"${raw_needle}"* | *"${api_needle}"*)
+                return 0
+                ;;
+            esac
+        done < <(grep -oE '[A-Za-z0-9+/]{80,}={0,2}' "${file}" 2>/dev/null || true)
+    done < <(find "${dir}" \( -path '*/.git' -o -path '*/.git/*' \) -prune -o -type f -print0)
+    return 1
+}
+
+# 本 fork 的标记文件存在，且目录里没有上游下载地址。
+function tree_is_this_fork() {
+    local dir="$1"
+
+    [[ -f "${dir}/.freelxs-fork" ]] || return 1
+    grep -q 'freelxs/Xray-script' "${dir}/.freelxs-fork" || return 1
+    if tree_has_upstream_url "${dir}"; then
+        return 1
+    fi
+    return 0
+}
+
+# 文件内容指纹。--update 用它判断是否真的需要替换，而不是只看 version 字段。
+function tree_fingerprint() {
+    local dir="$1"
+
+    (
+        cd "${dir}" || exit 1
+        find . \( -path './.git' -o -path './.git/*' \) -prune -o -type f -print0 |
+            sort -z |
+            xargs -0 -r sha256sum |
+            sha256sum |
+            awk '{print $1}'
+    )
+}
+
+# 把现有安装目录挪到旁边。用户的 Xray 配置在 ~/.xray-script 和 /usr/local/etc/xray，不在这个目录里。
+function backup_project_dir() {
+    local dest n
+
+    [[ -e "${PROJECT_ROOT}" ]] || return 0
+    dest="${PROJECT_ROOT}.bak.$(date +%Y%m%d%H%M%S)"
+    n=0
+    while [[ -e "${dest}" ]]; do
+        n=$((n + 1))
+        dest="${PROJECT_ROOT}.bak.$(date +%Y%m%d%H%M%S).${n}"
+    done
+    mv "${PROJECT_ROOT}" "${dest}"
+    LAST_PROJECT_BACKUP="${dest}"
+    echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['backup']} ${dest}"
+}
+
+function restore_project_backup() {
+    if [[ -n "${LAST_PROJECT_BACKUP:-}" && ! -e "${PROJECT_ROOT}" && -e "${LAST_PROJECT_BACKUP}" ]]; then
+        mv "${LAST_PROJECT_BACKUP}" "${PROJECT_ROOT}"
+    fi
+}
+
+# 下载完成后才挪走旧目录，避免下载失败时把正在使用的脚本目录清掉。
+function swap_in_project_tree() {
+    local temp_dir="$1"
+
+    [[ -e "${PROJECT_ROOT}" ]] && backup_project_dir
+    mkdir -p "$(dirname -- "${PROJECT_ROOT}")"
+    if ! mv "${temp_dir}" "${PROJECT_ROOT}"; then
+        restore_project_backup
+        _error "${I18N_DATA['failed']}: ${PROJECT_ROOT}"
+    fi
+}
+
 # =============================================================================
 # 函数名称: assert_safe_project_root
 # 功能描述: 拒绝空路径、相对路径和根目录，避免更新时删除错误目录。
@@ -495,42 +590,31 @@ function download_xray_script_files() {
 
 # =============================================================================
 # 函数名称: update_project_files
-# 功能描述: 仅在 --update 时对照本 fork 的 config.json 版本，不一致则替换安装目录。
+# 功能描述: --update 时下载本 fork，内容指纹不同就替换。版本号相同也会替换。
 # =============================================================================
 function update_project_files() {
-    local ref url tmp local_version remote_version temp_dir updated
-
-    ref="$(script_ref)"
-    url="https://raw.githubusercontent.com/freelxs/Xray-script/${ref}/config.json"
-    forbid_upstream_url "${url}"
-    tmp="$(mktemp)"
-    if ! curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 --output "${tmp}" "${url}"; then
-        rm -f "${tmp}"
-        _error "${I18N_DATA['failed']}: ${url}"
-    fi
-    remote_version="$(jq -r '.version // empty' "${tmp}")"
-    rm -f "${tmp}"
-    [[ -n "${remote_version}" ]] || _error "${I18N_DATA['failed']}: ${url}"
-
-    local_version=""
-    if [[ -f "${PROJECT_ROOT}/config.json" ]]; then
-        local_version="$(jq -r '.version // empty' "${PROJECT_ROOT}/config.json")"
-    elif [[ -f "${SCRIPT_CONFIG_PATH}" ]]; then
-        local_version="$(jq -r '.version // empty' "${SCRIPT_CONFIG_PATH}")"
-    fi
-    if [[ "${local_version}" == "${remote_version}" ]]; then
-        echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['same']}"
-        return 0
-    fi
+    local temp_dir remote_version local_fp remote_fp updated
 
     temp_dir="$(mktemp -d)"
     download_xray_script_files "${temp_dir}"
-    rm -rf "${PROJECT_ROOT}"
-    mkdir -p "$(dirname -- "${PROJECT_ROOT}")"
-    mv -f "${temp_dir}" "${PROJECT_ROOT}"
+    remote_version="$(jq -r '.version // empty' "${temp_dir}/config.json")"
+    [[ -n "${remote_version}" ]] || _error "${I18N_DATA['failed']}: ${temp_dir}/config.json"
+
+    if [[ -d "${PROJECT_ROOT}" ]] && tree_is_this_fork "${PROJECT_ROOT}"; then
+        local_fp="$(tree_fingerprint "${PROJECT_ROOT}")"
+        remote_fp="$(tree_fingerprint "${temp_dir}")"
+        if [[ -n "${local_fp}" && "${local_fp}" == "${remote_fp}" ]]; then
+            rm -rf "${temp_dir}"
+            echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['same']}"
+            return 0
+        fi
+    fi
+
+    swap_in_project_tree "${temp_dir}"
     if [[ -f "${PROJECT_ROOT}/install.sh" && "${CUR_DIR}/${CUR_FILE}" != "${PROJECT_ROOT}/install.sh" ]]; then
         cp -f "${PROJECT_ROOT}/install.sh" "${CUR_DIR}/${CUR_FILE}"
     fi
+    # 只改版本号，保留 UUID、密钥、端口等已有配置。
     if [[ -f "${SCRIPT_CONFIG_PATH}" ]]; then
         updated="$(jq --arg version "${remote_version}" '.version = $version' "${SCRIPT_CONFIG_PATH}")"
         printf '%s\n' "${updated}" >"${SCRIPT_CONFIG_PATH}"
@@ -541,25 +625,37 @@ function update_project_files() {
 
 # =============================================================================
 # 函数名称: install_project_files
-# 功能描述: 优先使用本地完整仓库。只有缺少文件，或显式 --update 时，才访问本 fork。
+# 功能描述: 已安装的本 fork 直接复用。上游目录或缺少标记的目录先备份再替换。
 # =============================================================================
 function install_project_files() {
+    local temp_dir
+
     assert_safe_project_root
     if [[ "${DO_UPDATE}" -eq 1 ]]; then
         update_project_files "$@"
         return 0
     fi
-    if project_tree_ready "${CUR_DIR}"; then
-        if [[ "${CUR_DIR}" != "${PROJECT_ROOT}" ]]; then
+    if [[ "${CUR_DIR}" != "${PROJECT_ROOT}" ]] && project_tree_ready "${CUR_DIR}" && tree_is_this_fork "${CUR_DIR}"; then
+        if [[ -e "${PROJECT_ROOT}" ]] && ! tree_is_this_fork "${PROJECT_ROOT}"; then
+            echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['replaced']}"
+            backup_project_dir
+        fi
+        if [[ ! -d "${PROJECT_ROOT}" ]] || ! tree_is_this_fork "${PROJECT_ROOT}"; then
             echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['local']}"
+            mkdir -p "${PROJECT_ROOT}"
             copy_project_tree "${CUR_DIR}" "${PROJECT_ROOT}"
         fi
         return 0
     fi
-    if project_tree_ready "${PROJECT_ROOT}"; then
+    if project_tree_ready "${PROJECT_ROOT}" && tree_is_this_fork "${PROJECT_ROOT}"; then
         return 0
     fi
-    download_xray_script_files "${PROJECT_ROOT}"
+    if [[ -e "${PROJECT_ROOT}" ]]; then
+        echo -e "${GREEN}[${I18N_DATA['tip']}]${NC} ${I18N_DATA['replaced']}"
+    fi
+    temp_dir="$(mktemp -d)"
+    download_xray_script_files "${temp_dir}"
+    swap_in_project_tree "${temp_dir}"
 }
 
 # =============================================================================

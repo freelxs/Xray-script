@@ -1512,8 +1512,14 @@ function handler_install() {
     fi
     # 检查 Xray 命令是否存在，或是否强制安装
     if ! cmd_exists 'xray' || [[ "${force_install}" != n ]]; then
-        # 调用 Xray-install 脚本进行安装
-        run_xray_install install -u root --version "${CONFIG_DATA['version']}"
+        local xray_tag="${CONFIG_DATA['version']}"
+        # 版本号会原样传给钉扎的安装脚本。空值、null 或以 - 开头都不能传。
+        if [[ ! "${xray_tag}" =~ ^v?[0-9][0-9A-Za-z._+-]*$ ]]; then
+            _error "invalid Xray version: ${xray_tag}"
+        fi
+        # 钉扎的 install-release.sh 接受 -u/--install-user。上游 main 已删除该参数，
+        # 旧树用 bash -c "..." @ install -u root 调用时会打印 "@: unknown option -- -"。
+        run_xray_install install -u root --version "${xray_tag}"
     fi
 }
 
